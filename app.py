@@ -5,12 +5,26 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# =============================================================================
+# PATCH CURL_CFFI — doit être fait AVANT l'import de yfinance
+# =============================================================================
+try:
+    import curl_cffi  # noqa: F401  — force yfinance à l'utiliser
+except ImportError:
+    pass
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
+
+# Cache yfinance dans /tmp (inscriptible sur Streamlit Cloud)
+try:
+    yf.set_tz_cache_location("/tmp")
+except Exception:
+    pass
 
 try:
     import feedparser
@@ -753,7 +767,8 @@ def get_fx_rate_to_eur(currency_code: str) -> float:
 
     try:
         pair = f"{currency}EUR=X"
-        history = yf.Ticker(pair).history(period="5d", interval="1d")
+        ticker_obj = yf.Ticker(pair)
+        history = ticker_obj.history(period="5d", interval="1d")
         if history is not None and not history.empty and "Close" in history:
             last_close = safe_float(history["Close"].dropna().iloc[-1], precision=6)
             if last_close and last_close > 0:
@@ -763,7 +778,8 @@ def get_fx_rate_to_eur(currency_code: str) -> float:
 
     try:
         inverse_pair = f"EUR{currency}=X"
-        history = yf.Ticker(inverse_pair).history(period="5d", interval="1d")
+        ticker_obj = yf.Ticker(inverse_pair)
+        history = ticker_obj.history(period="5d", interval="1d")
         if history is not None and not history.empty and "Close" in history:
             last_close = safe_float(history["Close"].dropna().iloc[-1], precision=6)
             if last_close and last_close > 0:
@@ -785,13 +801,23 @@ def fetch_yahoo_payload(symbol: str) -> Dict[str, Any]:
         payload["errors"].append(f"Ticker: {exc}")
         return payload
 
+    # --- info ---
     try:
         info = ticker.info
-        if isinstance(info, dict):
+        if isinstance(info, dict) and len(info) > 5:
             payload["info"] = info
+        else:
+            # Fallback: certaines versions de yfinance nécessitent get_info()
+            try:
+                info2 = ticker.get_info()
+                if isinstance(info2, dict) and len(info2) > 5:
+                    payload["info"] = info2
+            except Exception:
+                pass
     except Exception as exc:
         payload["errors"].append(f"info: {exc}")
 
+    # --- fast_info ---
     try:
         fast_obj = ticker.fast_info
         try:
@@ -830,7 +856,11 @@ def fetch_yahoo_payload(symbol: str) -> Dict[str, Any]:
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_history(symbol: str, period: str = "5y") -> pd.DataFrame:
     try:
-        history = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+        ticker_obj = yf.Ticker(symbol)
+        history = ticker_obj.history(period=period, interval="1d", auto_adjust=False)
+        if history is None or history.empty or "Close" not in history.columns:
+            # Retry avec auto_adjust=True
+            history = ticker_obj.history(period=period, interval="1d", auto_adjust=True)
         if history is None or history.empty or "Close" not in history.columns:
             return pd.DataFrame()
         history = history.copy()
@@ -1150,11 +1180,12 @@ def parse_rss_url(url: str) -> Any:
         request = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 AlphaTerminalPro/1.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         )
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
         return feedparser.parse(raw)
     except Exception:
